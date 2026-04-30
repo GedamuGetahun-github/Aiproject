@@ -1,0 +1,333 @@
+import streamlit as st
+import pandas as pd
+import cv2
+import os
+import tempfile
+import numpy as np
+import librosa
+import joblib
+from PIL import Image
+
+# Try importing DeepFace safely
+try:
+    from deepface import DeepFace
+    DEEPFACE_AVAILABLE = True
+except:
+    DEEPFACE_AVAILABLE = False
+
+st.set_page_config(page_title="AI Deception Detector", layout="wide")
+
+# ------------------ STYLE ------------------
+st.markdown("""
+<style>
+body, .stApp, .stMarkdown, .stTextInput, .stDataFrame, .stAlert,
+h1, h2, h3, h4, h5, h6, p, label, span, div {
+    color: white !important;
+}
+section[data-testid="stFileUploader"] span {
+    color: orange !important;
+}
+button[kind="primary"] {
+    color: black !important;
+    font-size: 14px !important;
+    padding: 0.4rem 1rem !important;
+    border-radius: 6px !important;
+}
+.stButton > button {
+    width: 100%;
+    padding: 15px;
+    font-size: 18px;
+    border-radius: 10px;
+    background-color: #00d4ff;
+    color: #0a0a2e;
+    font-weight: bold;
+    border: none;
+}
+.result-truth {
+    padding: 30px;
+    border-radius: 15px;
+    background-color: #00cc66;
+    text-align: center;
+    font-size: 36px;
+    font-weight: bold;
+}
+.result-lie {
+    padding: 30px;
+    border-radius: 15px;
+    background-color: #ff3333;
+    text-align: center;
+    font-size: 36px;
+    font-weight: bold;
+}
+.metric-box {
+    background: rgba(26, 26, 78, 0.8);
+    padding: 20px;
+    border-radius: 10px;
+    text-align: center;
+}
+</style>
+""", unsafe_allow_html=True)
+
+# ------------------ STATE ------------------
+if "page" not in st.session_state:
+    st.session_state.page = "landing"
+
+# ------------------ BACKGROUND ------------------
+def load_gif_base64(path):
+    import base64
+    if not os.path.exists(path):
+        return None
+    with open(path, "rb") as f:
+        return base64.b64encode(f.read()).decode()
+
+def set_bg(gif_file):
+    if gif_file is None:
+        return
+    st.markdown(f"""
+        <style>
+        .stApp {{
+            background: url(data:image/gif;base64,{gif_file});
+            background-size: cover;
+            background-repeat: no-repeat;
+            background-position: center;
+        }}
+        </style>
+    """, unsafe_allow_html=True)
+
+# ------------------ AUDIO MODEL LOADING ------------------
+@st.cache_resource
+def load_audio_model():
+    """Load your trained audio model"""
+    MODEL_PATH = "/home/gedex/Github ai/Ai-Based-Lie-Detection-main/audio_model.pkl"
+    try:
+        if os.path.exists(MODEL_PATH):
+            model = joblib.load(MODEL_PATH)
+            return model, True
+        else:
+            return None, False
+    except Exception as e:
+        st.error(f"Model load error: {e}")
+        return None, False
+
+# ------------------ AUDIO FEATURE EXTRACTION ------------------
+def extract_audio_features(audio_path):
+    """Extract pitch and MFCC features from audio file (32 features)"""
+    try:
+        y, sr = librosa.load(audio_path, sr=16000, duration=5)
+        
+        # Pitch features
+        pitches, magnitudes = librosa.piptrack(y=y, sr=sr)
+        pitch_values = pitches[pitches > 0]
+        
+        if len(pitch_values) > 0:
+            pitch_mean = np.mean(pitch_values)
+            pitch_std = np.std(pitch_values)
+            pitch_max = np.max(pitch_values)
+            pitch_min = np.min(pitch_values)
+        else:
+            pitch_mean = pitch_std = pitch_max = pitch_min = 0
+        
+        # MFCC features
+        mfccs = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)
+        mfcc_means = np.mean(mfccs, axis=1)
+        mfcc_stds = np.std(mfccs, axis=1)
+        
+        # Energy
+        energy = np.mean(librosa.feature.rms(y=y))
+        
+        # Zero crossing rate
+        zcr = np.mean(librosa.feature.zero_crossing_rate(y=y))
+        
+        # Combine all features (32 features total)
+        features = np.concatenate([
+            [pitch_mean, pitch_std, pitch_max, pitch_min, energy, zcr],
+            mfcc_means,
+            mfcc_stds
+        ])
+        
+        return features
+    except Exception as e:
+        st.error(f"Audio extraction error: {e}")
+        return None
+
+# ------------------ VIDEO EMOTION ANALYSIS ------------------
+def analyze_face_emotion(frame):
+    """Analyze a single frame for emotions"""
+    if not DEEPFACE_AVAILABLE:
+        return "neutral", 0.0
+    
+    try:
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        analysis = DeepFace.analyze(img_path=rgb_frame, actions=['emotion'], 
+                                     enforce_detection=False, silent=True)
+        emotion = analysis[0]['dominant_emotion']
+        
+        # IMPROVEMENT 3: Raised neutral score so it doesn't always pull result down
+        deception_emotions = {'fear': 0.9, 'surprise': 0.7, 'disgust': 0.8, 
+                              'angry': 0.6, 'sad': 0.5, 'neutral': 0.4, 'happy': 0.2}
+        deception_prob = deception_emotions.get(emotion, 0.3)
+        
+        return emotion, deception_prob
+    except:
+        return "unknown", 0.0
+
+# ------------------ LANDING ------------------
+def show_landing():
+    gif_base64 = load_gif_base64("landing.gif")
+    set_bg(gif_base64)
+
+    st.markdown("<h1 style='text-align: center;'>AI Based Deception Detection</h1>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align: center;'>Reveal truth through vision and emotion</p>", unsafe_allow_html=True)
+
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        if st.button("Upload Video File", use_container_width=True):
+            st.session_state.page = "upload"
+            st.rerun()
+    
+    with col2:
+        if st.button("Live Camera Analysis", use_container_width=True):
+            st.session_state.page = "live"
+            st.rerun()
+
+# ------------------ UPLOAD ANALYSIS ------------------
+def show_upload_analysis():
+    gif_base64 = load_gif_base64("analysis.gif")
+    set_bg(gif_base64)
+
+    st.markdown("<h3>Upload a video for analysis</h3>", unsafe_allow_html=True)
+    
+    if st.button("Back to Home"):
+        st.session_state.page = "landing"
+        st.rerun()
+
+    uploaded_file = st.file_uploader("Upload your .mp4 video", type=["mp4"])
+
+    if uploaded_file is not None:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp_file:
+            tmp_file.write(uploaded_file.read())
+            tmp_path = tmp_file.name
+
+        st.video(tmp_path)
+        st.success("Video uploaded. Running analysis...")
+
+        # Extract audio from video
+        audio_path = tmp_path.replace(".mp4", ".wav")
+        os.system(f"ffmpeg -i {tmp_path} -vn -acodec pcm_s16le -ar 16000 -ac 1 {audio_path} -y 2>/dev/null")
+        
+        # Audio analysis
+        audio_features = extract_audio_features(audio_path)
+        audio_model, model_loaded = load_audio_model()
+        
+        if audio_model is not None and audio_features is not None:
+            try:
+                audio_prediction = audio_model.predict([audio_features])[0]
+                audio_proba = audio_model.predict_proba([audio_features])[0]
+                audio_prob = audio_proba[1] if audio_prediction == 1 else audio_proba[0]
+            except:
+                audio_prob = 0.5
+        else:
+            audio_prob = 0.5
+        
+        # Video frame analysis
+        cap = cv2.VideoCapture(tmp_path)
+        emotions_detected = []
+        frame_count = 0
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            if frame_count % 30 == 0:
+                emotion, prob = analyze_face_emotion(frame)
+                emotions_detected.append((emotion, prob))
+            frame_count += 1
+        cap.release()
+        
+        if emotions_detected:
+            avg_deception_prob = np.mean([p for _, p in emotions_detected])
+        else:
+            avg_deception_prob = 0.0
+        
+        # IMPROVEMENT 1: MAX fusion instead of average
+        fused_score = max(audio_prob, avg_deception_prob)
+        final_prediction = "DECEPTION DETECTED" if fused_score > 0.5 else "TRUTH"
+        result_class = "result-lie" if fused_score > 0.5 else "result-truth"
+        
+        st.markdown(f"<div class='{result_class}'>{final_prediction}</div>", unsafe_allow_html=True)
+        st.markdown(f"**Fused Confidence:** {fused_score:.1%}")
+        
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Audio Score", f"{audio_prob:.1%}")
+        with col2:
+            st.metric("Video Score", f"{avg_deception_prob:.1%}")
+        with col3:
+            st.metric("Fused Score (MAX)", f"{fused_score:.1%}")
+
+# ------------------ LIVE CAMERA ANALYSIS ------------------
+def show_live_analysis():
+    gif_base64 = load_gif_base64("analysis.gif")
+    set_bg(gif_base64)
+
+    st.markdown("<h3>Live Camera Deception Detection</h3>", unsafe_allow_html=True)
+    st.markdown("<p>Your camera will turn on. Speak your statement clearly.</p>", unsafe_allow_html=True)
+    
+    if st.button("Back to Home"):
+        st.session_state.page = "landing"
+        st.rerun()
+
+    camera_image = st.camera_input("Position your face clearly and click to capture")
+
+    if camera_image is not None:
+        img = Image.open(camera_image)
+        frame = np.array(img)
+        frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+        
+        emotion, video_score = analyze_face_emotion(frame)
+        st.markdown(f"**Detected Expression:** {emotion}")
+        
+        st.markdown("### Record your statement (5 seconds)")
+        audio_value = st.audio_input("Click to record")
+        
+        if audio_value is not None:
+            audio_path = "live_audio.wav"
+            with open(audio_path, "wb") as f:
+                f.write(audio_value.getbuffer())
+            
+            audio_features = extract_audio_features(audio_path)
+            audio_model, model_loaded = load_audio_model()
+            
+            if audio_model is not None and audio_features is not None:
+                try:
+                    audio_prediction = audio_model.predict([audio_features])[0]
+                    audio_proba = audio_model.predict_proba([audio_features])[0]
+                    audio_prob = audio_proba[1] if audio_prediction == 1 else audio_proba[0]
+                except Exception as e:
+                    st.warning(f"Audio model error: {e}. Using fallback.")
+                    audio_prob = 0.5
+            else:
+                st.warning("Audio model not loaded. Using feature-based estimation.")
+                audio_prob = 0.5
+            
+            # IMPROVEMENT 1: MAX fusion instead of average
+            fused_score = max(audio_prob, video_score)
+            final_prediction = "DECEPTION DETECTED" if fused_score > 0.5 else "TRUTH"
+            result_class = "result-lie" if fused_score > 0.5 else "result-truth"
+            
+            st.markdown(f"<div class='{result_class}'>{final_prediction}</div>", unsafe_allow_html=True)
+            st.markdown(f"**Fused Confidence:** {fused_score:.1%}")
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                st.metric("Audio Deception Score", f"{audio_prob:.1%}")
+            with col2:
+                st.metric("Video Deception Score", f"{video_score:.1%}")
+
+# ------------------ ROUTING ------------------
+if st.session_state.page == "landing":
+    show_landing()
+elif st.session_state.page == "upload":
+    show_upload_analysis()
+elif st.session_state.page == "live":
+    show_live_analysis()
